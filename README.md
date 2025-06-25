@@ -26,7 +26,7 @@ Your generated trace should have the following structure:
 
 ```sh
 experiment-results/
-├── traces.otf            # The anchor file for the ScoreP trace
+├── traces.otf2           # The anchor file for the ScoreP trace
 ├── traces.def            # The definition file for the ScoreP trace
 ├── scorep.cfg            # The environment configuration file for ScoreP
 └── traces/               # Directory containing the thread specific events and definitions
