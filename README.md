@@ -1,6 +1,6 @@
 # hpc-energy-trace-analysis
 
-This repository contains code for analyzing ScoreP traces containing energy consumption information.
+This repository contains code for analyzing ScoreP traces containing fine-grained energy consumption information.
 It primarily focuses on attributing energy consumption to specific MPI ranks, GPU devices on those ranks, and the GPU kernels executed on those devices.
 
 # Requirements
