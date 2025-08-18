@@ -189,7 +189,45 @@ class Timeline:
 class CallGraph(Timeline):
     def __init__(self):
         super().__init__()
-    
+        
+    def depth(self) -> int:
+        """
+        Get the current depth of the call stack.
+        The depth is defined as the number of live intervals currently in the stack.
+        
+        Returns
+        -------
+        int
+            The current depth of the call stack.
+        """
+        return len(self.live_intervals)
+        
+    def inclusive_runtime(self, start: float, end: float=float('inf')) -> Dict[str, float]:
+        """
+        Calculate the inclusive runtime of each function over the time window [start, end].
+        Inclusive runtime means the total time a function spends running, including time consumed by its child calls.
+        
+        Parameters
+        ----------
+        start : float
+            Start of the time window.
+        end : float
+            End of the time window.
+        Returns
+        -------
+        Dict[str, float]
+            A mapping from function names to their inclusive runtimes.
+        """
+        intervals = self.get_intervals_between(start, end)
+        # Sum all the durations of intervals for each function
+        inclusive: Dict[str, float] = defaultdict(float)
+        for iv in intervals:
+            if iv.end is not None:
+                duration = iv.end - iv.start
+                if iv.name is not None:
+                    inclusive[iv.name] += duration
+        return dict(inclusive)
+
     def exclusive_runtime(self, start: float, end: float=float('inf')) -> Dict[str, float]:
         """
         Calculate the exclusive runtime of each function over the time window [start, end].
@@ -503,6 +541,26 @@ class MetricAttribution:
                 idle_value = device_max_sample[device].value - sum(m.value for m in attributions.values())
                 print(f"   Idle attribution for {device}: {idle_value:.6f} {device_max_sample[device].unit if device_max_sample[device] else ''}")
 
+    def get_samples(self) -> pd.DataFrame:
+        """
+        Get all samples as a DataFrame.
+        
+        Returns
+        -------
+        pd.DataFrame
+            A DataFrame containing all samples with columns for device, metric name, value, time, and unit.
+        """
+        rows = []
+        for device, samples in self.device_samples.items():
+            for sample in samples:
+                rows.append({
+                    "Device": device,
+                    "Metric Name": sample.name,
+                    "Value": sample.value,
+                    "Time": sample.time,
+                    "Unit": sample.unit,
+                })
+        return pd.DataFrame(rows)
 
 class TestInterval(unittest.TestCase):
     def test_is_active(self):

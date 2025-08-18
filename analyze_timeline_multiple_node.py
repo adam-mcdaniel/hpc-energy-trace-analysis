@@ -14,10 +14,11 @@ Date: 2025-06-23
 '''
 
 from interval_timeline import MetricAttribution, Metric
+import matplotlib.pyplot as plt
 import otf2
 
 # The trace file to analyze.
-TRACE = "./scorep-traces/frontier-hpl-run-using-2-ranks/traces.otf2"
+TRACE = "./scorep-traces/frontier-hpl-run-using-2-ranks-with-craypm/traces.otf2"
 
 # This is a prefix for the node names in the cluster.
 # This is used to identify the node name for each location.
@@ -32,25 +33,29 @@ NODES = []
 # The list of threads that are assigned to each GPU on the node.
 # In ScoreP, the first number in HIP[x:y] is the GPU number,
 # and the second number is the stream number.
-GPU_THREADS = {
+DEVICE_THREADS = {
     'GPU-0': ['HIP[0:0]', 'HIP[0:1]', 'HIP[0:2]', 'HIP[0:3]'],
     'GPU-1': ['HIP[1:0]', 'HIP[1:1]', 'HIP[1:2]', 'HIP[1:3]'],
     'GPU-2': ['HIP[2:0]', 'HIP[2:1]', 'HIP[2:2]', 'HIP[2:3]'],
     'GPU-3': ['HIP[3:0]', 'HIP[3:1]', 'HIP[3:2]', 'HIP[3:3]'],
+    'GPU-0 Cray PM Counters (Energy)': [],
+    'GPU-0 Cray PM Counters (Power)': [],
 }
 
 # A mapping from thread names (e.g., HIP[0:0]) to GPU names (e.g., GPU-0).
-LOCATION_TO_GPU_NAME = {location: gpu for gpu, locations in GPU_THREADS.items() for location in locations}
+LOCATION_TO_DEVICE_NAME = {location: gpu for gpu, locations in DEVICE_THREADS.items() for location in locations}
 
 # A map of metric names recorded by ScoreP to the GPUs they correspond to.
 # Each of these metrics is collected for a specific device on each node
-METRICS_TO_GPU = {
+METRICS_TO_DEVICE = {
     # Each Mi250X GPU on Frontier has 2 GCDs, so we take the even numbered
     # metrics. The odd numbers always report zero.
-    f'A2rocm_smi:::energy_count:device=0': 'GPU-0',
-    f'A2rocm_smi:::energy_count:device=2': 'GPU-1',
-    f'A2rocm_smi:::energy_count:device=4': 'GPU-2',
-    f'A2rocm_smi:::energy_count:device=6': 'GPU-3',
+    'A2rocm_smi:::energy_count:device=0': ('GPU-0', 'Joules', lambda x: x / 1_000_000),
+    'A2rocm_smi:::energy_count:device=2': ('GPU-1', 'Joules', lambda x: x / 1_000_000),
+    'A2rocm_smi:::energy_count:device=4': ('GPU-2', 'Joules', lambda x: x / 1_000_000),
+    'A2rocm_smi:::energy_count:device=6': ('GPU-3', 'Joules', lambda x: x / 1_000_000),
+    'A3coretemp:::craypm:accel0_energy': ('GPU-0 Cray PM Counters (Energy)', 'Joules', lambda x: x),
+    'A3coretemp:::craypm:accel0_power': ('GPU-0 Cray PM Counters (Power)', 'Watts', lambda x: x),
 }
 
 # The initial GPU energy readings for each GPU on each node.
@@ -100,8 +105,8 @@ with otf2.reader.open(TRACE) as reader:
         if node_name not in NODES:
             print("Identified new node:", node_name)
             NODES.append(node_name)
-            node_attributions[node_name] = MetricAttribution(GPU_THREADS)
-            node_initial_gpu_energy[node_name] = {gpu: None for gpu in METRICS_TO_GPU.values()}
+            node_attributions[node_name] = MetricAttribution(DEVICE_THREADS)
+            node_initial_gpu_energy[node_name] = {device_info[0]: None for device_info in METRICS_TO_DEVICE.values()}
         
         if isinstance(event, otf2.events.Enter):
             # If the event is an Enter event, we record the entry into a function or region for a given device
@@ -113,17 +118,19 @@ with otf2.reader.open(TRACE) as reader:
             # `location.name` is the thread name (e.g., HIP[0:0]), and we just record the time of the leave event
             # -- the callstack should already know where we are leaving from.
             node_attributions[node_name].leave(time=current_time, thread=location.name)
-        elif isinstance(event, otf2.events.Metric) and event.member.name in METRICS_TO_GPU:
+        elif isinstance(event, otf2.events.Metric) and event.member.name in METRICS_TO_DEVICE:
             # If we're recording a metric event that we want to attribute to a GPU kernel,
             # we first determine which GPU this metric corresponds to.
             # We first look at which GPU the metric is associated with using the `METRICS_TO_GPU` mapping.
             # The GPU name will be one of 'GPU-0', 'GPU-1', 'GPU-2, etc.
-            gpu_name = METRICS_TO_GPU.get(event.member.name, LOCATION_TO_GPU_NAME.get(location.name, "Unknown GPU"))
+            device_name = METRICS_TO_DEVICE[event.member.name][0]
+            unit = METRICS_TO_DEVICE[event.member.name][1]
+            value_transform = METRICS_TO_DEVICE[event.member.name][2]
             
             # If the initial GPU energy for this node and GPU is not set, we set it to the current metric value.
-            if node_initial_gpu_energy[node_name][gpu_name] is None:
-                node_initial_gpu_energy[node_name][gpu_name] = event.value / 1000000
-                
+            if node_initial_gpu_energy[node_name][device_name] is None:
+                node_initial_gpu_energy[node_name][device_name] = value_transform(event.value)
+
             # We then sample the metric, subtracting the initial energy reading to get the energy consumed
             # since the last metric reading.
             # The value is divided by 1,000,000 to convert from microjoules to joules.
@@ -131,17 +138,19 @@ with otf2.reader.open(TRACE) as reader:
                 # The name of the metric, e.g., 'A2rocm_smi:::energy_count:device=0'
                 name=event.member.name,
                 # The value of the metric, adjusted by subtracting the initial energy reading for this GPU.
-                value=event.value / 1000000 - node_initial_gpu_energy[node_name][gpu_name],
+                value=value_transform(event.value) - node_initial_gpu_energy[node_name][device_name],
                 # The time of the event in seconds since the start of the trace.
                 # This is used to attribute the energy consumption for the active kernels and threads
                 # when the metric was recorded.
                 time=current_time,
                 # The name of the device (e.g. 'frontier00000:HIP[0:0]') for which the metric is recorded.
-                device=gpu_name,
+                device=device_name,
                 # The unit of the metric value, which is Joules in this case.
                 unit="J",
             ))
-
+print(f"Trace start time: {start_time / timer_resolution:.2f} seconds")
+print(f"Trace end time: {end_time / timer_resolution:.2f} seconds")
+print('Now reporting metrics for each node...')
 # Report the attributions for each node and generate Gantt charts.
 for node in NODES:
     attribution = node_attributions[node]
@@ -150,3 +159,62 @@ for node in NODES:
     print("\n")
     attribution.report()
     attribution.gantt_chart()
+    
+    
+    # Now get the GPU samples for this node and graph them directly.
+    metrics = [
+        'A2rocm_smi:::energy_count:device=0',
+        'A2rocm_smi:::energy_count:device=2',
+        'A2rocm_smi:::energy_count:device=4',
+        'A2rocm_smi:::energy_count:device=6',
+        'A3coretemp:::craypm:accel0_energy',
+        'A3coretemp:::craypm:accel0_power',
+    ]
+
+    samples = attribution.get_samples() # A dataframe with columns "Device", "Metric Name", "Value", "Time", "Unit"
+    samples = samples[samples['Metric Name'].isin(metrics)]
+
+    samples = samples.sort_values(['Device', 'Metric Name', 'Time'])
+    # For each metric, get the value, time, and name as a list
+    
+    # Remove rows where the value is zero, as these are not useful for plotting.
+    
+    samples['Derived Power'] = samples.groupby(['Device', 'Metric Name'])['Value'].diff() / samples.groupby(['Device', 'Metric Name'])['Time'].diff()
+    # Set the derived power to the value
+    # Set all the derived power values for 'A3coretemp:::craypm:accel0_power' to 1
+    samples.loc[samples['Metric Name'] == 'A3coretemp:::craypm:accel0_power', 'Derived Power'] = 1
+    
+    samples = samples[samples['Derived Power'] != 0]
+    samples = samples.sort_values(['Device', 'Metric Name', 'Time'])
+    samples['Derived Power'] = samples.groupby(['Device', 'Metric Name'])['Value'].diff() / samples.groupby(['Device', 'Metric Name'])['Time'].diff()
+    samples.loc[samples['Metric Name'] == 'A3coretemp:::craypm:accel0_power', 'Derived Power'] = samples['Value']
+
+    # Write the samples to a CSV file for further analysis if needed.
+    samples.to_csv(f"{node}_gpu_samples.csv", index=False)
+    # Write the samples to a CSV file for further analysis if needed.
+    # samples.to_csv(f"{node}_gpu_samples.csv", index=False)
+    
+    # # Now graph the samples using a simple line plot. Show a different figure in the same window for each GPU.
+    # fig, axes = plt.subplots(nrows=len(DEVICE_THREADS.keys()), figsize=(10, 5 * len(DEVICE_THREADS.keys())), sharex=True)
+    # # Iterate over each GPU and plot its samples
+    # for i, (gpu, group) in enumerate(samples.groupby('Device')):
+    #     ax = axes[i]
+    #     ax.plot(group['Time'], group['Value'], label=gpu, lw=1)
+    #     ax.set_ylabel(f"{gpu} Energy (J)")
+    #     ax.set_xlabel("Time (s)")
+    #     ax.legend()
+    #     ax.grid(True)
+
+    # # Now graph the samples using a simple line plot. Show a different figure in the same window for each GPU.
+    # fig, axes = plt.subplots(nrows=len(DEVICE_THREADS.keys()), figsize=(10, 5 * len(DEVICE_THREADS.keys())), sharex=True)
+    # # Iterate over each GPU and plot its samples
+    # for i, (gpu, group) in enumerate(samples.groupby('Device')):
+    #     ax = axes[i]
+    #     ax.plot(group['Time'], group['Derived Power'], label=gpu, lw=1)
+    #     ax.set_ylabel(f"{gpu} Power (W)")
+    #     ax.set_xlabel("Time (s)")
+    #     ax.legend()
+    #     ax.grid(True)
+    
+    # # Show the plot
+    # plt.show()

@@ -15,9 +15,11 @@ Date: 2025-06-23
 
 from interval_timeline import MetricAttribution, Metric
 import otf2
+import matplotlib.pyplot as plt
 
 # The trace file to analyze.
-TRACE = "./scorep-traces/simple-mi300-example-run/traces.otf2"
+# TRACE = "./scorep-traces/simple-mi300-example-run/traces.otf2"
+TRACE = "./scorep-traces/mi300-multiple-kernels-two-gpus/traces.otf2"
 
 # The list of threads that are assigned to each GPU on the node.
 # In ScoreP, the first number in HIP[x:y] is the GPU number,
@@ -116,3 +118,31 @@ with otf2.reader.open(TRACE) as reader:
 # Report the attributions for each device and generate Gantt charts.
 attribution.report()
 attribution.gantt_chart()
+
+
+# Now get the GPU samples for this node and graph them directly.
+graphed_metrics = [
+    'A2rocm_smi:::energy_count:device=0',
+    'A2rocm_smi:::energy_count:device=1',
+    'A2rocm_smi:::energy_count:device=2',
+    'A2rocm_smi:::energy_count:device=3',
+]
+
+samples = attribution.get_samples() # A dataframe with columns "Device", "Metric Name", "Value", "Time", "Unit"
+samples = samples[samples['Metric Name'].isin(graphed_metrics)]
+
+# Now graph the samples using a simple line plot. Show a different figure in the same window for each GPU.
+fig, axes = plt.subplots(nrows=len(GPU_THREADS.keys()), figsize=(10, 5 * len(GPU_THREADS.keys())), sharex=True)
+# Iterate over each GPU and plot its samples
+for i, (gpu, group) in enumerate(samples.groupby('Device')):
+    ax = axes[i]
+    ax.plot(group['Time'], group['Value'], label=gpu, lw=1)
+    ax.set_ylabel(f"Energy for {gpu} (Joules)")
+    ax.set_xlabel("Time (seconds)")
+    ax.legend()
+    ax.grid(True)
+
+# Show the plot
+plt.show()
+    
+    
